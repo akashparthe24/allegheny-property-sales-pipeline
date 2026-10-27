@@ -1,0 +1,48 @@
+sale_code,sale_desc,is_market_sale,notes
+0,VALID SALE,true,County's own valid flag -- the baseline arm's-length market sale.
+PV,CLEAN AND GREEN VALID PREFERENTIAL,true,Preferential-assessment sale the county itself still marks VALID; only 33 rows.
+3,LOVE AND AFFECTION SALE,false,Family/gift transfer; price is not a market price by definition.
+H,MULTI-PARCEL SALE,false,"Price covers multiple parcels together, not this one parcel alone."
+14,TIME ON MARKET (INSUFF/EXCESS),false,"County flags the exposure period as abnormal, so price isn't a clean comp."
+36,QUIT CLAIM,false,"Quitclaim deeds are typically used to clear title or transfer within family, not arm's-length sales."
+9,OTHER INVALID SALES INDICATED,false,Explicitly labeled invalid by the county.
+99,CORRECTIVE DEED / DUPLICATE SALE,false,"Administrative correction or duplicate record, not a new transaction."
+AA,SALE NOT ANALYZED,false,County has not reviewed or confirmed validity -- treated as not-confirmed-market rather than assumed valid.
+1,SHERIFF SALE,false,"Foreclosure auction, not an open-market sale."
+UR,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+35,CORPORATION TRANSFER,false,"Internal corporate restructuring transfer, not a market transaction."
+GV,GOVERNMENT SALE,false,Government party to the sale; not open-market pricing.
+16,BUILDING NOT YET ASSESSED,false,"Assessment-status flag, not a confirmed market price."
+DT,DATE OF TRANSFER (RECORD YR <> SALE YR),false,"Administrative timing flag, not a confirmation of market validity."
+Z,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+27,NO ASSESSED VALUATION,false,"Assessment-status flag, not a confirmed market price."
+2,CITY TREASURER SALE,false,"Tax or treasurer sale, not open-market."
+37,ESTATE SALE,false,Estate transfers are frequently not arm's-length market prices.
+N,NOT APPLICABLE,false,Explicitly not applicable.
+33,SALE OF PREVIOUS FORECLOSURE - INVALID,false,Explicitly labeled invalid.
+U,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+BK,BANK/FINANCIAL INSTITUTION,false,"Bank-owned or REO disposition, not a typical open-market sale."
+13,EXEMPT BUYER OR SELLER,false,Exempt party to the transaction; price basis is not necessarily market-driven.
+28,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+ND,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+PA,PREFERENTIAL ASMT,false,Preferential-assessment program sale; unlike PV it is not flagged VALID by the county.
+6,CHANGED AFTER SALE,false,Record altered after the fact; price validity is suspect.
+19,INCLUDES PERSONAL PROPERTY,false,"Price bundles non-real-property value, skewing it as a parcel comp."
+5,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+34,SHORT SALE - INVALID,false,Explicitly labeled invalid.
+32,COURT ORDERED SALE,false,"Court-mandated, not an open-market sale."
+X,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+29,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+VB,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+V,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+XX,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+0X,OTHER,false,"Visually similar to code 0, but is a distinct code -- not assumed to mean the same thing."
+S,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+8,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+4,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+UX,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+50,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+VH,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+PX,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+21,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
+YY,OTHER,false,Unspecified other catch-all; no basis to confirm market validity.
