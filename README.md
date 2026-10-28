@@ -159,22 +159,32 @@ needed a manual override like `ALLOW_ROW_COUNT_DROP` absolutely should).
 
 ## What surprised me
 
-The real surprise happened mid-build, not in a single static pull: on October
-27th, `make run` failed a check it had never failed before --
-`row_count_vs_previous_run` -- reporting a 21.4% drop, from 506,315 rows to
-397,885. My first assumption was a broken or partial download, which is
-exactly the failure mode that check exists to catch. I re-ran it, got the
-identical file back (same hash), and then went around the pipeline entirely
-and hit WPRDC's `datastore_search` API directly: its own `total` field
-reported 397,885, and the resource's `last_modified` timestamp showed
-2026-10-26 -- the day before I ran this. The county had genuinely reloaded
-the dataset with 108,430 fewer rows. That's not a bug in the
-file, it's a real change to the source, and it's exactly the scenario the
-exercise's "explain how you'd handle an update" requirement was asking about
--- I just got to live it instead of hypothesizing about it. I ended up adding
-an explicit, logged override (`ALLOW_ROW_COUNT_DROP=1`) rather than loosening
-the check's threshold, because a permanently looser threshold would have
-blinded the pipeline to the next *actual* partial download.
+The biggest surprise wasn't in any single pull of the data -- it's that this
+dataset has no version history and no stable size at all. I pulled it several
+times over the course of building this (Oct 22, Oct 23, Oct 27), and the row
+count wasn't just growing with new sales the way I expected an "updated
+daily" feed to behave -- it dropped by over 100,000 rows between two of those
+pulls. The county overwrites this resource in place on its own schedule, and
+there's no changelog telling you whether "updated" means a handful of new
+sales or a full, unannounced reload. Any pipeline built against this source
+has to assume the shape of the data can change under it at any time, not
+just grow.
+
+I found out how real that was mid-build: `make run` failed a check it had
+never failed before -- `row_count_vs_previous_run` -- reporting a 21.4% drop,
+from 506,315 rows to 397,885. My first assumption was a broken or partial
+download, which is exactly the failure mode that check exists to catch. I
+re-ran it, got the identical file back (same hash), and then went around the
+pipeline entirely and hit WPRDC's `datastore_search` API directly: its own
+`total` field reported 397,885, and the resource's `last_modified` timestamp
+showed 2026-10-26, the day before. The county had genuinely reloaded the
+dataset with 108,430 fewer rows. That's not a bug in the file, it's a real
+change to the source, and it's exactly the scenario the exercise's "explain
+how you'd handle an update" requirement was asking about -- I just got to
+live it instead of hypothesizing about it. I ended up adding an explicit,
+logged override (`ALLOW_ROW_COUNT_DROP=1`) rather than loosening the check's
+threshold, because a permanently looser threshold would have blinded the
+pipeline to the next *actual* partial download.
 
 Two smaller surprises, from the data itself: Pittsburgh doesn't exist as a
 single municipality in this dataset at all -- it's dozens of separate ward
