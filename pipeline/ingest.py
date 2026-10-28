@@ -69,8 +69,9 @@ def _load_into_duckdb(con, raw_path):
     return con.execute("SELECT COUNT(*) FROM raw_sales").fetchone()[0]
 
 
-def ingest(con) -> dict:
-    run_id = db.next_run_id(con)
+def ingest(con, run_id=None) -> dict:
+    if run_id is None:
+        run_id = db.next_run_id(con)
     content = _download()
     checksum = hashlib.sha256(content).hexdigest()
 

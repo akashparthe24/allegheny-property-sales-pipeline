@@ -1,4 +1,5 @@
 """All tunable settings in one place: API location, paths, schema expectations, thresholds."""
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,3 +50,10 @@ MAX_LOWPRICE_IN_MARKET_SALES_PCT = 0.5  # percent
 # A run that returns drastically fewer rows than the prior run likely means a partial
 # or truncated download, not that the county deleted history.
 MAX_ROW_COUNT_DROP_PCT = 5.0  # percent
+
+# This check should default to failing loud, never to silently loosening its own
+# threshold. The only way past it is an explicit, logged human override for a single
+# run -- set after independently confirming the drop against the source (e.g. WPRDC's
+# own datastore_search `total` and the resource's `last_modified`), not a config edit
+# that would blind the check to the next *real* partial download.
+ALLOW_ROW_COUNT_DROP_OVERRIDE = os.environ.get("ALLOW_ROW_COUNT_DROP") == "1"

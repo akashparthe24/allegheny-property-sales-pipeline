@@ -87,15 +87,28 @@ def _check_row_count_vs_previous(con):
         return {"name": "row_count_vs_previous_run", "passed": True, "detail": "no prior run to compare against"}
     drop_pct = 100.0 * (previous - current) / previous
     threshold = config.MAX_ROW_COUNT_DROP_PCT
-    return {
-        "name": "row_count_vs_previous_run",
-        "passed": drop_pct <= threshold,
-        "detail": (
+    exceeds = drop_pct > threshold
+    overridden = exceeds and config.ALLOW_ROW_COUNT_DROP_OVERRIDE
+    if not exceeds:
+        detail = f"{current} rows vs. {previous} previously (+{-drop_pct:.1f}%)"
+    elif overridden:
+        detail = (
+            f"row count dropped {drop_pct:.1f}% vs. previous run ({previous} -> {current}), "
+            f"exceeding the {threshold}% allowance -- ALLOW_ROW_COUNT_DROP override applied, "
+            "treat this as a new baseline only after independently confirming the drop "
+            "against the source (e.g. datastore_search 'total' and the resource's "
+            "last_modified timestamp)"
+        )
+    else:
+        detail = (
             f"row count dropped {drop_pct:.1f}% vs. previous run ({previous} -> {current}), "
             f"exceeding the {threshold}% allowance -- looks like a partial download"
-            if drop_pct > threshold
-            else f"{current} rows vs. {previous} previously (+{-drop_pct:.1f}%)"
-        ),
+        )
+    return {
+        "name": "row_count_vs_previous_run",
+        "passed": not exceeds or overridden,
+        "overridden": overridden,
+        "detail": detail,
     }
 
 
