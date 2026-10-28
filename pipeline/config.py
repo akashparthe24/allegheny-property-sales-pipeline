@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # https://data.wprdc.org/dataset/real-estate-sales
 CKAN_BASE_URL = "https://data.wprdc.org"
 PACKAGE_ID = "9e0ce87d-07b8-420c-a8aa-9de6104f61d6"
-RESOURCE_ID = "5bbe6c55-bce6-4edb-9d04-68edeb6bf7b1"  # "Property Sales Transactions" (2012-present, ~506k rows, updated daily)
+RESOURCE_ID = "5bbe6c55-bce6-4edb-9d04-68edeb6bf7b1"  # "Property Sales Transactions" (2012-present; size varies -- the county reloads this resource on its own schedule, see README "What surprised me")
 CSV_DUMP_URL = f"{CKAN_BASE_URL}/datastore/dump/{RESOURCE_ID}"
 
 # --- Local paths ---
@@ -30,13 +30,14 @@ REQUIRED_COLUMNS = [
     "PRICE", "DEEDBOOK", "DEEDPAGE", "SALECODE", "INSTRTYP",
 ]
 
-# Business/natural key for a sale record. This mirrors the primary key WPRDC's own
-# ETL uses to upsert this resource (see the package's `etl_by_resource` extra on
-# https://data.wprdc.org/api/3/action/package_show?id=real-estate-sales), so it's not
-# a guess -- it's the key the source system itself treats as uniquely identifying a sale.
-NATURAL_KEY_COLUMNS = [
-    "PARID", "RECORDDATE", "SALEDATE", "DEEDBOOK", "DEEDPAGE", "INSTRTYP", "PRICE", "SALECODE",
-]
+# The natural key for a sale record -- (PARID, RECORDDATE, SALEDATE, DEEDBOOK, DEEDPAGE,
+# INSTRTYP, PRICE, SALECODE) -- mirrors the primary key WPRDC's own ETL uses to upsert
+# this resource (see the package's `etl_by_resource` extra on
+# https://data.wprdc.org/api/3/action/package_show?id=real-estate-sales). It's not
+# defined as a constant here: it's used identically in two places that speak different
+# languages -- the dedup in sql/01_staging.sql and the duplicate-key check in checks.py --
+# and keeping it as literal column lists in each is clearer than threading a Python list
+# into a hand-written SQL file for one query.
 
 # --- Quality-check thresholds ---
 # Measured against a live pull of the full dataset (2026-10-22): rows officially coded
