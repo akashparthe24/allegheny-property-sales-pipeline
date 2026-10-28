@@ -11,7 +11,6 @@ CKAN_BASE_URL = "https://data.wprdc.org"
 PACKAGE_ID = "9e0ce87d-07b8-420c-a8aa-9de6104f61d6"
 RESOURCE_ID = "5bbe6c55-bce6-4edb-9d04-68edeb6bf7b1"  # "Property Sales Transactions" (2012-present, ~506k rows, updated daily)
 CSV_DUMP_URL = f"{CKAN_BASE_URL}/datastore/dump/{RESOURCE_ID}"
-DATASTORE_SEARCH_URL = f"{CKAN_BASE_URL}/api/3/action/datastore_search"
 
 # --- Local paths ---
 DATA_DIR = ROOT / "data"

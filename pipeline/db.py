@@ -89,18 +89,6 @@ def log_run(con, run_id, resource_id, checksum, row_count, status, note=""):
     )
 
 
-def last_successful_row_count(con) -> int | None:
-    row = con.execute(
-        """
-        SELECT row_count FROM load_log
-        WHERE status = 'downloaded'
-        ORDER BY run_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    return row[0] if row else None
-
-
 def start_pipeline_run(con, run_id):
     con.execute(
         """
