@@ -20,8 +20,8 @@ make run           # ingest -> clean -> quality checks -> mart -> publish
 make test           # 19 pytest tests, no network required
 ```
 
-`seeds/sale_codes.csv` already ships filled in (see "Sale-code classification"
-below) so `make run` works out of the box. `make seed-draft` exists so the
+`seeds/sale_codes.csv` already ships filled in (see design decision 3, below)
+so `make run` works out of the box. `make seed-draft` exists so the
 classification can be regenerated or re-reviewed if the county adds new codes.
 
 Output lands at `output/municipality_year_summary.csv`: one row per
