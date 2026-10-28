@@ -167,8 +167,8 @@ exactly the failure mode that check exists to catch. I re-ran it, got the
 identical file back (same hash), and then went around the pipeline entirely
 and hit WPRDC's `datastore_search` API directly: its own `total` field
 reported 397,885, and the resource's `last_modified` timestamp showed
-2026-10-26 -- the day before. The county had genuinely reloaded the dataset
-with 108,430 fewer rows, two days before my deadline. That's not a bug in the
+2026-10-26 -- the day before I ran this. The county had genuinely reloaded
+the dataset with 108,430 fewer rows. That's not a bug in the
 file, it's a real change to the source, and it's exactly the scenario the
 exercise's "explain how you'd handle an update" requirement was asking about
 -- I just got to live it instead of hypothesizing about it. I ended up adding
