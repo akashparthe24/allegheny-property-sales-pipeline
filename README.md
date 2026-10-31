@@ -17,8 +17,7 @@ python3 -m venv .venv
 .venv/bin/python run.py
 ```
 
-No downloads, no Docker, no cloud account. Everything lands in one local
-SQLite file, `data/warehouse.sqlite3`.
+Everything lands in SQLite file, `data/warehouse.sqlite3`.
 
 Output lands at the `property_sales_mart` table inside that database: one row
 per municipality per year (`MUNICODE, MUNIDESC, SALE_YEAR, TOTAL_SALE_COUNT,
