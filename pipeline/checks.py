@@ -1,8 +1,19 @@
-"""Data quality checks. Each one returns a dict with name/passed/detail; nothing
-gets published (see run.py) if any check in either stage fails."""
+"""Data quality checks: pre-load (run before property_sales_load is touched)
+and post-load (run after it's loaded)."""
 from . import config
 
 
+# A required column is missing from the API response.
+class SchemaChangedError(RuntimeError):
+    pass
+
+
+# Row count changed too much vs. the previous run.
+class RowCountChangeError(RuntimeError):
+    pass
+
+
+# One or more post-load checks failed; holds every failure, not just the first.
 class CheckFailure(RuntimeError):
     def __init__(self, failures):
         self.failures = failures
@@ -10,145 +21,149 @@ class CheckFailure(RuntimeError):
         super().__init__(f"{len(failures)} check(s) failed: {detail}")
 
 
-def _check_row_count_not_zero(con):
-    n = con.execute("SELECT COUNT(*) FROM stg_sales").fetchone()[0]
-    return {"name": "row_count_not_zero", "passed": n > 0, "detail": f"{n} rows in stg_sales"}
+# Pre-load check: all of config.REQUIRED_COLUMNS must be present.
+def check_required_columns(api_columns):
+    missing = [c for c in config.REQUIRED_COLUMNS if c not in api_columns]
+    if missing:
+        raise SchemaChangedError(
+            f"API response is missing expected columns {missing}. "
+            "The source may have changed shape -- stopping rather than guessing at a mapping."
+        )
 
 
-def _check_no_duplicate_natural_key(con):
+# True once property_sales_load has been created at least once.
+def _table_exists(con) -> bool:
+    return con.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", [config.LOAD_TABLE]
+    ).fetchone()[0] > 0
+
+
+# Pre-load check: new row count vs. the previous run, within config.MAX_ROW_COUNT_CHANGE_PCT.
+# ALLOW_ROW_COUNT_DROP=1 overrides a failure instead of raising (and gets logged).
+def check_row_count_vs_previous(con, new_total: int) -> dict:
+    if not _table_exists(con):
+        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
+                "detail": "no prior data to compare against (first run)"}
+
+    previous = con.execute(f"SELECT COUNT(*) FROM {config.LOAD_TABLE}").fetchone()[0]
+    if previous == 0:
+        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
+                "detail": "no prior data to compare against (table empty)"}
+
+    pct_change = 100.0 * (new_total - previous) / previous
+    exceeds = abs(pct_change) > config.MAX_ROW_COUNT_CHANGE_PCT
+
+    if not exceeds:
+        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
+                "detail": f"{previous} -> {new_total} ({pct_change:+.1f}%)"}
+
+    if config.ALLOW_ROW_COUNT_DROP_OVERRIDE:
+        return {
+            "name": "row_count_vs_previous", "passed": True, "overridden": True,
+            "detail": (
+                f"{previous} -> {new_total} ({pct_change:+.1f}%) exceeds the "
+                f"{config.MAX_ROW_COUNT_CHANGE_PCT}% allowance -- ALLOW_ROW_COUNT_DROP override "
+                "applied. Treat this as a new baseline only after independently confirming the "
+                "change against the source."
+            ),
+        }
+
+    raise RowCountChangeError(
+        f"row count would change {previous} -> {new_total} ({pct_change:+.1f}%), exceeding the "
+        f"{config.MAX_ROW_COUNT_CHANGE_PCT}% allowance -- could be a partial/interrupted load on "
+        "our end, or a real change at the source. Not loading until a human confirms which. "
+        "Set ALLOW_ROW_COUNT_DROP=1 to proceed after confirming this is legitimate."
+    )
+
+
+# Should always pass -- the matching unique index makes duplicates impossible.
+def _check_no_duplicate_key(con, name, key_columns, index_where):
+    cols = ", ".join(f'"{c}"' for c in key_columns)
     n = con.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM (
-            SELECT parcel_id, record_date, sale_date, deed_book, deed_page,
-                   instrument_type, price, sale_code, COUNT(*) c
-            FROM stg_sales
-            GROUP BY 1,2,3,4,5,6,7,8
+            SELECT {cols}, COUNT(*) c
+            FROM {config.LOAD_TABLE}
+            WHERE {index_where}
+            GROUP BY {cols}
             HAVING COUNT(*) > 1
         )
         """
     ).fetchone()[0]
-    return {
-        "name": "no_duplicate_natural_key",
-        "passed": n == 0,
-        "detail": f"{n} duplicate natural-key groups found after de-dup" if n else "ok",
-    }
+    return {"name": name, "passed": n == 0,
+            "detail": f"{n} duplicate key group(s) found" if n else "ok"}
 
 
-def _check_unknown_sale_codes(con):
-    rows = con.execute(
-        "SELECT DISTINCT sale_code FROM stg_sales WHERE NOT is_known_code"
-    ).fetchall()
-    codes = [r[0] for r in rows]
-    return {
-        "name": "unknown_sale_codes",
-        "passed": len(codes) == 0,
-        "detail": (
-            f"{len(codes)} sale code(s) present in the data but missing from "
-            f"seeds/sale_codes.csv: {codes}. Add them (run `make seed-draft` to see "
-            "counts) before this can pass."
-            if codes else "ok"
-        ),
-    }
+# Fails if `column` is blank (NULL or '') on any row.
+def _check_not_null(con, column):
+    n = con.execute(
+        f'SELECT COUNT(*) FROM {config.LOAD_TABLE} WHERE "{column}" IS NULL OR "{column}" = \'\''
+    ).fetchone()[0]
+    return {"name": f"{column.lower()}_not_null", "passed": n == 0,
+            "detail": f"{n} row(s) with blank {column}" if n else "ok"}
 
 
-def _check_lowprice_in_market_sales(con):
+# A negative price is nonsensical and would distort any median computed from it.
+def _check_price_not_negative(con):
+    n = con.execute(
+        f'SELECT COUNT(*) FROM {config.LOAD_TABLE} '
+        f'WHERE "PRICE" IS NOT NULL AND "PRICE" != \'\' AND CAST("PRICE" AS REAL) < 0'
+    ).fetchone()[0]
+    return {"name": "price_not_negative", "passed": n == 0,
+            "detail": f"{n} row(s) with a negative PRICE" if n else "ok"}
+
+
+# Dataset-specific check: RECORDDATE before SALEDATE is a logical impossibility
+# (e.g. a typo'd year). Allows a small baseline rate (~0.14%, real clerical noise).
+def _check_recorded_before_sale_rate(con):
     row = con.execute(
-        """
+        f"""
         SELECT
-            SUM(CASE WHEN is_market_sale THEN 1 ELSE 0 END) AS market_n,
-            SUM(CASE WHEN is_market_sale AND is_zero_or_one_dollar THEN 1 ELSE 0 END) AS bad_n
-        FROM stg_sales
+            SUM(CASE WHEN "RECORDDATE" < "SALEDATE" THEN 1 ELSE 0 END) AS bad,
+            COUNT(*) AS total_with_both
+        FROM {config.LOAD_TABLE}
+        WHERE "RECORDDATE" != '' AND "SALEDATE" != ''
         """
     ).fetchone()
-    market_n, bad_n = row[0] or 0, row[1] or 0
-    pct = (100.0 * bad_n / market_n) if market_n else 0.0
-    threshold = config.MAX_LOWPRICE_IN_MARKET_SALES_PCT
+    bad, total_with_both = row[0] or 0, row[1] or 0
+    pct = (100.0 * bad / total_with_both) if total_with_both else 0.0
+    threshold = config.MAX_RECORDED_BEFORE_SALE_PCT
     return {
-        "name": "lowprice_in_market_sales_rate",
+        "name": "recorded_before_sale_rate",
         "passed": pct <= threshold,
         "detail": (
-            f"{bad_n}/{market_n} ({pct:.3f}%) of rows coded as market sales have a "
-            f"$0/$1 price, vs. the {threshold}% allowed. A small nonzero rate is "
-            "expected (the county's own validation misses a handful of clerical "
-            "errors); a rate this high usually means the sale-code join broke."
+            f"{bad}/{total_with_both} ({pct:.3f}%) rows have RECORDDATE before SALEDATE, "
+            f"vs. the {threshold}% allowed. A small nonzero rate is expected (clerical typos, "
+            "e.g. a year entered as '0212' instead of '2012'); a rate this high suggests a "
+            "date-parsing or source problem, not routine clerical noise."
         ),
     }
 
 
-def _check_row_count_vs_previous(con):
-    current = con.execute("SELECT COUNT(*) FROM raw_sales").fetchone()[0]
-    row = con.execute(
-        "SELECT row_count FROM load_log WHERE status = 'downloaded' "
-        "ORDER BY run_id DESC LIMIT 2"
-    ).fetchall()
-    # row[0] is this run's own just-logged entry (if ingest ran); row[1] is the prior one.
-    previous = row[1][0] if len(row) > 1 else None
-    if previous is None or previous == 0:
-        return {"name": "row_count_vs_previous_run", "passed": True, "detail": "no prior run to compare against"}
-    drop_pct = 100.0 * (previous - current) / previous
-    threshold = config.MAX_ROW_COUNT_DROP_PCT
-    exceeds = drop_pct > threshold
-    overridden = exceeds and config.ALLOW_ROW_COUNT_DROP_OVERRIDE
-    if not exceeds:
-        detail = f"{current} rows vs. {previous} previously (+{-drop_pct:.1f}%)"
-    elif overridden:
-        detail = (
-            f"row count dropped {drop_pct:.1f}% vs. previous run ({previous} -> {current}), "
-            f"exceeding the {threshold}% allowance -- ALLOW_ROW_COUNT_DROP override applied, "
-            "treat this as a new baseline only after independently confirming the drop "
-            "against the source (e.g. datastore_search 'total' and the resource's "
-            "last_modified timestamp)"
-        )
-    else:
-        detail = (
-            f"row count dropped {drop_pct:.1f}% vs. previous run ({previous} -> {current}), "
-            f"exceeding the {threshold}% allowance -- looks like a partial download"
-        )
-    return {
-        "name": "row_count_vs_previous_run",
-        "passed": not exceeds or overridden,
-        "overridden": overridden,
-        "detail": detail,
-    }
-
-
-def run_pre_mart_checks(con):
-    checks = [
-        _check_row_count_not_zero(con),
-        _check_no_duplicate_natural_key(con),
-        _check_unknown_sale_codes(con),
-        _check_lowprice_in_market_sales(con),
-        _check_row_count_vs_previous(con),
-    ]
-    failures = [c for c in checks if not c["passed"]]
-    if failures:
-        raise CheckFailure(failures)
-    return checks
-
-
-def _check_mart_not_empty(con):
-    n = con.execute("SELECT COUNT(*) FROM mart_municipality_year").fetchone()[0]
-    return {"name": "mart_not_empty", "passed": n > 0, "detail": f"{n} rows"}
-
-
-def _check_pct_market_sale_in_range(con):
+# UPDATE_TIMESTAMP should never be earlier than INSERT_TIMESTAMP.
+def _check_timestamp_consistency(con):
     n = con.execute(
-        "SELECT COUNT(*) FROM mart_municipality_year "
-        "WHERE pct_market_sale < 0 OR pct_market_sale > 100"
+        f'SELECT COUNT(*) FROM {config.LOAD_TABLE} WHERE "UPDATE_TIMESTAMP" < "INSERT_TIMESTAMP"'
     ).fetchone()[0]
-    return {
-        "name": "pct_market_sale_in_range",
-        "passed": n == 0,
-        "detail": f"{n} rows with pct_market_sale outside [0, 100]" if n else "ok",
-    }
+    return {"name": "timestamp_consistency", "passed": n == 0,
+            "detail": f"{n} row(s) where UPDATE_TIMESTAMP precedes INSERT_TIMESTAMP (upsert bug)" if n else "ok"}
 
 
-def run_post_mart_checks(con):
-    checks = [
-        _check_mart_not_empty(con),
-        _check_pct_market_sale_in_range(con),
+# Run every post-load check; raise CheckFailure (with all failures) if any failed.
+def run_post_load_checks(con):
+    result = [
+        _check_no_duplicate_key(con, "no_duplicate_main_key", config.MAIN_KEY, config.MAIN_INDEX_WHERE),
+        _check_no_duplicate_key(con, "no_duplicate_fallback_key", config.FALLBACK_KEY, config.FALLBACK_INDEX_WHERE),
+        _check_not_null(con, "PARID"),
+        _check_not_null(con, "SALEDATE"),
+        _check_not_null(con, "SALECODE"),
+        _check_not_null(con, "INSTRTYP"),
+        _check_not_null(con, "MUNICODE"),
+        _check_price_not_negative(con),
+        _check_recorded_before_sale_rate(con),
+        _check_timestamp_consistency(con),
     ]
-    failures = [c for c in checks if not c["passed"]]
+    failures = [c for c in result if not c["passed"]]
     if failures:
         raise CheckFailure(failures)
-    return checks
+    return result

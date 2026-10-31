@@ -1,211 +1,239 @@
 # Allegheny County Property Sale Transactions
 
-A small, re-runnable pipeline that turns the county's raw sales feed into one
-clean question: **what's the typical market sale price per municipality each
-year, how fast is it moving, and how many recorded "sales" aren't real market
-transactions at all?**
+A small, re-runnable pipeline that turns the county's live property sale feed
+into one clean answer: **what's the typical market sale price per
+municipality each year, how fast is it moving, and how many recorded "sales"
+are not real market transactions at all?**
 
 Source: [Allegheny County Property Sale Transactions](https://data.wprdc.org/dataset/real-estate-sales)
-on WPRDC (CKAN package `real-estate-sales`, resource `5bbe6c55-bce6-4edb-9d04-68edeb6bf7b1`).
-~398,000 rows as of this submission, 2012-present, updated by the county on its
-own schedule (see "What surprised me" below -- that number moved a lot during
-the week this was built).
+on WPRDC (CKAN resource `5bbe6c55-bce6-4edb-9d04-68edeb6bf7b1`), pulled live via
+the `datastore_search` API, 2012-present.
 
 ## How to run it
 
 ```
-make setup        # creates a venv, installs duckdb/requests/pytest
-make seed-draft    # pulls the live data, prints a profile, drafts seeds/sale_codes.draft.csv
-make run           # ingest -> clean -> quality checks -> mart -> publish
-make test           # 19 pytest tests, no network required
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python run.py
 ```
 
-`seeds/sale_codes.csv` already ships filled in (see design decision 3, below)
-so `make run` works out of the box. `make seed-draft` exists so the
-classification can be regenerated or re-reviewed if the county adds new codes.
+No downloads, no Docker, no cloud account -- everything lands in one local
+SQLite file, `data/warehouse.sqlite3`.
 
-Output lands at `output/municipality_year_summary.csv`: one row per
-municipality per year (`municipality_code, municipality_name, sale_year,
-total_sale_count, market_sale_count, non_market_sale_count, pct_market_sale,
-median_market_price, yoy_median_price_change_pct`).
+Output lands at the `property_sales_mart` table inside that database: one row
+per municipality per year (`MUNICODE, MUNIDESC, SALE_YEAR, TOTAL_SALE_COUNT,
+MARKET_SALE_COUNT, NON_MARKET_SALE_COUNT, PCT_MARKET_SALE,
+MEDIAN_MARKET_PRICE, YOY_MEDIAN_PRICE_CHANGE_PCT`). Inspect it with:
 
-Every run is tracked in two DuckDB tables, independent of the output table --
-see "Run and error tracking" below.
+```
+sqlite3 data/warehouse.sqlite3 "SELECT * FROM property_sales_mart LIMIT 10;"
+```
+
+**Why SQLite, over DuckDB/Postgres/dbt:** it needed zero setup (no Docker, no
+server process, one file on disk), supports real `UNIQUE` indexes and
+`ON CONFLICT ... DO UPDATE` upserts, which the re-runnability requirement
+depends on directly, and ships with Python already. **Drawback:** it's
+missing conveniences a warehouse-oriented engine like DuckDB has built in --
+no `MEDIAN()` aggregate (computed by hand instead, via ranked window
+functions), no native CSV reader, and single-writer only, which would matter
+at real concurrency but doesn't here. I'd reach for Postgres or DuckDB instead
+if this needed to serve concurrent readers/writers or handle the 100x-scale
+data volumes discussed below.
 
 ## Design decisions
 
-These are the four decisions I'd defend as the most consequential. Each one
-had a real alternative I considered and rejected.
+**1. Upsert on `(PARID, DEEDBOOK, DEEDPAGE)`, not a full reload every run.**
+The alternative I rejected was what I actually built first: drop and reload
+the whole raw table every run. It's simpler, but it throws away the question
+"did anything actually change since last time," which matters once a pipeline
+runs daily rather than once. The real key problem was picking the right
+columns: a sale's identity can't include `PRICE`/`SALECODE`, because those are
+exactly the fields the county corrects after the fact -- if they were part of
+the key, a correction would look like "a new row appeared" instead of "an
+existing row changed." I also rejected keying on `PARID` alone: a parcel can
+legitimately sell many times (one parcel in this data has 24 separate sales
+across 14 years), so that would have silently overwritten real transaction
+history down to one row per property. The key landed on `(PARID, DEEDBOOK,
+DEEDPAGE)` -- which document, which page, this specific transaction is
+recorded on -- with a wider 8-column fallback key for the ~600 rows (0.1%)
+missing deed info, since SQLite's unique index treats two blank values as
+never equal to each other.
+**Drawback:** two keys means two upsert statements and two partial indexes
+instead of one simple `DROP`+reload -- more code to reason about, and it took
+two real bugs (see "What surprised me") to get right. A full reload would have
+been correct on day one; this needed testing against live data to trust.
 
-**1. Full refresh every run, not incremental pagination.**
-I considered pulling only new/changed rows via `datastore_search` with a
-`RECORDDATE >=` cursor, which is the obvious move for a dataset that's
-"updated daily." I rejected it for now because the source itself does a full
-wipe-and-reload on its end (visible in the CKAN package's own ETL metadata),
-so there's no durable "only what changed" cursor to anchor an incremental
-pull against -- and at ~85-110MB/400-500k rows, downloading the whole file
-takes a few seconds, so there's nothing to optimize yet. I made the repeat
-cost of full refresh cheap instead: the download is hashed, and the reload is
-skipped entirely if the content hasn't changed since the last successful run
-(`pipeline/ingest.py`). This is the first thing I'd revisit at 100x scale --
-see below.
+**2. The clean layer flags anomalies; it doesn't drop them.**
+The rejected alternative was silently excluding rows with a $0/$1 price or a
+record-date-before-sale-date from the clean table. That's tempting because it
+makes the "bad data" problem disappear, but it also means the published row
+counts would quietly shrink with no record of why, and anyone reading the
+output would have no way to know a filter had already been applied on their
+behalf. Instead, `property_sales_clean` keeps every usable row and adds
+boolean flag columns (`IS_ZERO_OR_ONE_DOLLAR`, `RECORDED_BEFORE_SALE`,
+`IS_ZIP_INVALID`, `IS_STATE_NOT_PA`), so a $1 family gift is still counted as
+a real transaction, just correctly excluded from the *market-price*
+calculation specifically. Only rows that are genuinely unusable -- a blank
+`PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`, `MUNICODE`, an unparseable sale
+date, or a negative price -- are dropped, and that's a deliberate, documented
+rule, not a silent side effect of a quality check.
+**Drawback:** the clean table is not actually "clean" in the sense of being
+safe to aggregate blindly -- anyone querying it has to know to filter on the
+flag columns for a market-price calculation, or they'll silently include $1
+gift sales in their numbers. A pre-filtered table would be harder to misuse,
+at the cost of hiding information.
 
-**2. De-duplication on the source's own natural key, not a surrogate key.**
-The alternative was to let DuckDB assign a row number or hash the full row as
-a synthetic primary key. I rejected that because it would make "is this the
-same sale as last time" an accident of column order rather than a real
-business rule. Instead, rows are deduplicated on
-`(PARID, RECORDDATE, SALEDATE, DEEDBOOK, DEEDPAGE, INSTRTYP, PRICE, SALECODE)`
--- the exact key WPRDC's own ETL job uses to upsert this resource (visible in
-`package_show`'s `etl_by_resource` extra). Re-running the pipeline, or
-re-downloading a file the county re-published with corrections, can't produce
-duplicate rows, because the key isn't a guess.
-
-**3. Sale-code classification lives in an editable seed file, not in code.**
-The alternative was a `CASE WHEN sale_code IN (...)` block baked into the SQL.
-I rejected that because whether a code counts as a "market sale" is a judgment
-call about 47 different codes (only ~17% of rows are the plain `0 / VALID
-SALE` code), not a parsing problem -- burying that judgment in SQL would make
-it invisible and hard to review. It's an editable CSV (`seeds/sale_codes.csv`)
-with a reason recorded for every code, joined in at staging time. Any code
-present in the data but missing from the seed fails the pipeline loudly
-(`unknown_sale_codes` check) instead of silently defaulting to market or
-non-market.
-
-**4. A full run/error audit trail in DuckDB, not print-only logging.**
-The first version of this pipeline only printed check results to stdout and
-exited non-zero on failure -- nothing was queryable after the terminal closed.
-I rejected leaving it that way once I actually hit a real failure while
-building this (see below) and had no way to look back at what happened
-without re-reading scrollback. Now every run writes a row to `pipeline_runs`
-(started, finished, status, which stage failed if any, row counts at every
-stage, output path, headline stats) and every error or failed check writes a
-row to `pipeline_errors` (stage, error type, message), keyed by the same
-`run_id`. A run that trips three checks at once gets three queryable error
-rows, not one swallowed exception.
+**3. Schema and row-count checks run *before* the real load, with an explicit,
+logged override -- not a block with no way through.**
+The rejected alternative was validating only after loading: pull everything,
+then decide whether to trust it. I moved the two cheapest, highest-blast-radius
+checks (does the API still have the columns we depend on, and did the total
+row count move more than a normal day's activity would explain) to run against
+just the first API page, before `property_sales_load` is touched at all. A
+pure "block and refuse" design has a real failure mode, though: this county's
+dataset does occasionally get reloaded with a genuinely different row count,
+not because of a broken pipeline but because the source changed. A check with
+no way past it would mean a legitimate change permanently wedges the pipeline.
+So `ALLOW_ROW_COUNT_DROP=1` exists as a single-run, explicit override -- and
+using it still writes a row to `pipeline_errors`, so an override leaves a
+permanent trace instead of silently disabling the check.
+**Drawback:** the override is still a human trusting their own judgment in
+the moment -- it's logged, not prevented. A more rigorous version would cross-
+check the drop against the source's own metadata (e.g. its `last_modified`
+timestamp) automatically before allowing an override, rather than relying on
+a person to have done that check themselves.
 
 ## Run and error tracking
 
-Two DuckDB tables, inserted by `run.py`, independent of `load_log` (which only
-tracks ingest download/skip decisions):
+Every execution of `run.py` writes a row to **`pipeline_runs`**: started as
+`running`, updated at the end to `success` (with rows loaded and duration) or
+`failed` (with `failed_stage` naming exactly which of the four stages broke:
+`ingest`, `post_load_checks`, `transform_clean`, `transform_mart`). A process
+that crashes mid-run leaves no permanent "stuck" state -- the next `connect()`
+call automatically marks any leftover `running` row as `failed`/`orphaned`.
 
-- **`pipeline_runs`** -- one row per execution. Inserted as `status='running'`
-  at the start, then updated in place: either to `'success'` with
-  `raw_row_count`, `staged_row_count`, `mart_row_count`, `output_path`, and
-  two headline stats (`pct_market_sale_overall`, `median_market_price_overall`),
-  or to `'failed'` with `failed_stage` naming exactly which stage broke
-  (`ingest` / `staging` / `pre_checks` / `mart` / `post_checks` / `publish`).
-- **`pipeline_errors`** -- one row per error *event*, foreign-keyed to
-  `pipeline_runs.run_id`. A failed quality check logs its own name and detail
-  message here; an exception logs its type and message. Nothing is published
-  if a run fails, but the failure is still fully queryable afterward.
+**`pipeline_errors`** holds one row per failure or quality-check violation,
+keyed to `run_id`, so a run that trips three checks at once gets three
+queryable rows, not one swallowed exception -- and an `ALLOW_ROW_COUNT_DROP`
+override gets logged here too, even on an otherwise-successful run.
 
-Both tables are append-only history, not something you read by eyeballing a
-terminal -- e.g. `SELECT * FROM pipeline_errors WHERE error_type =
-'unknown_sale_codes' ORDER BY occurred_at DESC` answers "how often has this
-specific check failed" without re-running anything.
+## Data quality checks
 
-## Scaling to 100x / daily refresh
+Twelve checks total, all of which genuinely abort the run on failure (not just
+log a warning):
 
-At ~40-50M rows the full-CSV-every-run approach stops being free, and it's
-the first thing I'd change: switch ingestion to `datastore_search` filtered by
-a watermark on `RECORDDATE`, and upsert into `raw_sales` on the natural key
-instead of `CREATE OR REPLACE TABLE`. The staging and mart SQL stay the same
-shape, but DuckDB on a single local file would need to move to partitioned
-Parquet (by `sale_year`) so dedup and the mart rebuild don't re-scan the
-entire history every run. For a daily unattended refresh, the pipeline logic
-itself doesn't need to change -- it's already idempotent and it won't publish
-on a failed check -- what's missing is an actual scheduler (cron or an
-orchestrator like Airflow/Dagster calling `make run`) and alerting on top of
-`pipeline_runs`/`pipeline_errors` (today a failure just sits in the table
-until someone queries it; at scale that should page someone, and a run that
-needed a manual override like `ALLOW_ROW_COUNT_DROP` absolutely should).
+- **Pre-load** (run before any row is touched): required columns present;
+  row count vs. the previous run, within 5% (either direction).
+- **Post-load**: no duplicate keys under either the main or fallback upsert
+  key; `PARID`/`SALEDATE`/`SALECODE`/`INSTRTYP`/`MUNICODE` never blank; `PRICE`
+  never negative; `UPDATE_TIMESTAMP` never earlier than `INSERT_TIMESTAMP`;
+  and the dataset-specific check below.
+
+**The check written because of something found in this dataset:**
+`RECORDDATE` before `SALEDATE` is a logical impossibility -- the deed can't be
+recorded before the sale happened. It shows up on 730 rows (0.14%) in the live
+data, almost certainly clerical typos (e.g. a year entered as `0212` instead
+of `2012`). The check allows up to 1% before failing, calibrated to that
+measured baseline -- a rate much higher than that would mean a real
+date-parsing bug, not routine human error.
+
+## Re-running / handling updates
+
+Running `python run.py` twice back-to-back is safe: the upsert key means a
+second run with unchanged source data touches zero rows (verified directly --
+`INSERT_TIMESTAMP` and `UPDATE_TIMESTAMP` stayed identical across two
+consecutive runs). When the source *does* change, new or corrected rows are
+inserted/updated individually rather than requiring a full reload, and the
+row-count check (see above) is what catches the source changing more
+drastically than expected -- which, during this build, it genuinely did once:
+a live pull came back with a 21% smaller row count than the pull three days
+earlier. The check caught it correctly; I confirmed independently against the
+API's own reported total that the smaller count was real, not a broken
+download, before proceeding.
+
+## Scaling to 100x / daily refreshes
+
+At tens of millions of rows, paginating the full `datastore_search` endpoint
+every run (currently ~100 HTTP requests, 1-3 minutes) stops being free. I'd
+switch to pulling only rows past a watermark via `datastore_search_sql`
+(confirmed this endpoint supports a real `WHERE` clause against this
+resource), while keeping a periodic full-key-set reconciliation pass --
+because a pure incremental-by-date pull can never notice a row *disappearing*
+from the source, which is exactly the kind of change this project already
+proved can happen. For daily unattended runs, the pipeline logic itself
+doesn't need to change -- it's already idempotent and won't publish on a
+failed check -- what's missing is an actual scheduler (cron, or an
+orchestrator like Airflow/Dagster calling `run.py`) and alerting on top of
+`pipeline_runs`/`pipeline_errors`, since today a failure or an override just
+sits in a table until someone queries it.
 
 ## What was left out
 
-- No address/geocoding work -- `FULL_ADDRESS` and friends are in the raw data
-  but unused; this pipeline only answers the municipality/year question.
-- No attempt to collapse Pittsburgh/McKeesport/Duquesne/Clairton's ward-level
-  `MUNICODE`s into one city row. The mart keeps the county's own grain as-is
-  rather than silently rolling wards up -- that's a real analytical decision
-  with real tradeoffs (does a stadium-district sale belong with the rest of
-  the city?), and a loading pipeline shouldn't make it quietly on an analyst's
-  behalf.
-- No alerting on a failed or overridden run -- failures and overrides are
-  fully logged in `pipeline_runs`/`pipeline_errors`, but nothing notifies a
-  human; today you have to think to query it.
-- No handling for schema *additions* (new optional columns) -- only required
-  columns are checked, so the pipeline won't break if the county adds a
-  field, but it also won't surface it.
-- No scheduling/orchestration -- this is a script you run, not a deployed
+- **No automated test suite.** Every piece of logic here was verified by
+  hand against live data and deliberately-injected bad data during
+  development (including catching two real bugs this way), but none of that
+  is captured as a repeatable `pytest` suite in the repo. Given more time,
+  this is the first thing I'd add back.
+- **No address/geocoding work.** Address sub-fields are carried in the raw
+  table but unused everywhere downstream -- this pipeline only answers the
+  municipality/year question.
+- **No CSV export.** The output lives as a real database table
+  (`property_sales_mart`), which satisfies "produce one output table," but
+  there's no step that also writes it to a flat file for easier sharing.
+- **No alerting.** Failures and overrides are fully logged, but nothing
+  notifies a human -- someone has to think to query `pipeline_errors`.
+- **No scheduling/orchestration.** This is a script you run, not a deployed
   daily job, per the scope of the exercise.
+- **No mart-level quality checks.** `property_sales_mart` itself isn't
+  re-validated after being built (e.g. "does every row's percentage fall
+  between 0 and 100"); only the raw and clean layers are checked.
 
 ## Findings
 
-- Only **17.0%** of the ~398,000 recorded transactions are coded `0 / VALID
-  SALE` by the county -- the single largest category is actually family
-  transfers ("LOVE AND AFFECTION SALE", 19.9%), ahead of valid sales, followed
-  by multi-parcel bundles, quitclaims, and a long tail of other non-market
-  codes.
-- **23.1%** of all rows carry a price of exactly $0 or $1 (13,325 and 78,717
-  rows respectively) -- almost entirely non-market codes, as expected, but a
-  reminder that price alone is a dangerous filter without the sale code.
-- Median market sale price and its year-over-year change vary enormously
-  across the county's 175 distinct municipality/ward codes -- see
-  `output/municipality_year_summary.csv` for the full breakdown.
-- 713 rows have a recording date earlier than the sale date -- a logical
-  impossibility that's clearly a data-entry issue (e.g., one row has a
-  `RECORDDATE` of `0212-08-01`, almost certainly meant to be `2012-08-01`).
+- Only **19.8%** of all 506,991 recorded transactions are genuine market
+  sales by the county's own sale codes -- the rest are family transfers,
+  sheriff sales, corporate transfers, multi-parcel bundles, and a long tail
+  of administrative codes.
+- **313,967** distinct parcels account for 506,991 rows -- most properties
+  that appear more than once sold 2-3 times over the 2012-2026 window, but
+  one parcel has 24 separate recorded sales.
+- **600 rows** (0.1%) are missing deed book/page information and needed a
+  separate matching rule to avoid duplicating on every run.
+- **730 rows** (0.14%) have a recording date before the sale date -- a
+  measurable, consistent baseline of clerical error in the source.
 
 ## What surprised me
 
-The biggest surprise wasn't in any single pull of the data -- it's that this
-dataset has no version history and no stable size at all. I pulled it several
-times over the course of building this (Oct 22, Oct 23, Oct 27), and the row
-count wasn't just growing with new sales the way I expected an "updated
-daily" feed to behave -- it dropped by over 100,000 rows between two of those
-pulls. The county overwrites this resource in place on its own schedule, and
-there's no changelog telling you whether "updated" means a handful of new
-sales or a full, unannounced reload. Any pipeline built against this source
-has to assume the shape of the data can change under it at any time, not
-just grow.
+The biggest surprise wasn't a property of the data itself -- it's that this
+source has no stable size at all. During this build, a live pull came back
+with 21% fewer rows than one pulled three days earlier, and I confirmed
+independently (via the API's own `total` field and the resource's
+`last_modified` timestamp) that it was a real change at the source, not a
+broken download on my end. Any pipeline built against this feed has to assume
+its *shape*, not just its contents, can change between runs.
 
-I found out how real that was mid-build: `make run` failed a check it had
-never failed before -- `row_count_vs_previous_run` -- reporting a 21.4% drop,
-from 506,315 rows to 397,885. My first assumption was a broken or partial
-download, which is exactly the failure mode that check exists to catch. I
-re-ran it, got the identical file back (same hash), and then went around the
-pipeline entirely and hit WPRDC's `datastore_search` API directly: its own
-`total` field reported 397,885, and the resource's `last_modified` timestamp
-showed 2026-10-26, the day before. The county had genuinely reloaded the
-dataset with 108,430 fewer rows. That's not a bug in the file, it's a real
-change to the source, and it's exactly the scenario the exercise's "explain
-how you'd handle an update" requirement was asking about -- I just got to
-live it instead of hypothesizing about it. I ended up adding an explicit,
-logged override (`ALLOW_ROW_COUNT_DROP=1`) rather than loosening the check's
-threshold, because a permanently looser threshold would have blinded the
-pipeline to the next *actual* partial download.
-
-Two smaller surprises, from the data itself: Pittsburgh doesn't exist as a
-single municipality in this dataset at all -- it's dozens of separate ward
-codes, which would have silently produced a nonsensical "Pittsburgh" row if
-I'd grouped by municipality name without checking first. And DuckDB's own CSV
-sniffer can't auto-detect this file's dialect -- it errors out of the box and
-needs `strict_mode=false` -- a reminder that "well-formed CSV" and "CSV a
-tool can auto-sniff" aren't the same thing.
+The second surprise was more mundane but cost real debugging time: SQLite's
+`CAST('' AS REAL)` silently returns `0.0`, not `NULL`. Combined with the fact
+that "missing" in this API's response is sometimes a true JSON `null` and
+sometimes an empty string -- not consistently one or the other -- a naive cast
+of a blank `PRICE` would have miscast it to a literal $0 and then wrongly
+flagged it as a suspiciously-cheap sale, conflating "we don't know the price"
+with "the price really is zero." This was caught by testing the clean-table
+build against real loaded data before trusting it (it silently dropped 2,711
+otherwise-valid rows on the first attempt) rather than by reasoning about the
+SQL alone.
 
 ## AI disclosure
 
 I built this with Claude Code (Anthropic's CLI agent) as my primary tool
-through the whole exercise, not just for a narrow sub-task. Claude looked up
-the real WPRDC dataset (package and resource IDs, column schema), pulled the
-live data to profile it and draft the sale-code classification, and wrote the
-pipeline code, SQL, and tests against that real data rather than synthetic
-fixtures. When the `row_count_vs_previous_run` check failed against live data
-during the build (see above), Claude helped me investigate it -- querying
-WPRDC's `datastore_search` API directly to confirm the drop was real rather
-than a download bug -- and I made the call on how to handle it (an explicit,
-audited override, not a loosened threshold). I reviewed every design
-decision above, the sale-code classification in `seeds/sale_codes.csv`, and
-the quality-check logic, and I can explain and defend each one without
-notes.
+through the whole exercise. I directed the architecture through discussion --
+the choice of SQLite, the upsert key design (and specifically rejecting
+`PARID` alone and rejecting including `PRICE`/`SALECODE` in the key), the
+flag-vs-drop rule for anomalies, and the check thresholds -- and Claude
+implemented and tested each piece against the live dataset. We found and fixed
+two real bugs together by testing against real data rather than trusting the
+SQL in the abstract: a NULL-handling bug that silently excluded 2,711 valid
+rows from the clean table, and a partial-index collision bug where normalizing
+blank deed info for one upsert key unexpectedly collided with the other key's
+index. I reviewed the design decisions, the sale-code classification, and the
+quality-check logic above, and can explain and defend each one without notes.
