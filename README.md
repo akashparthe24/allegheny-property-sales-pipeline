@@ -168,26 +168,25 @@ calling `run.py`) and alerting on top of `pipeline_runs`/`pipeline_errors`,
 since today a failure or an override just sits in a table until someone
 queries it.
 
-## What was left out
+## What I scoped out, and why
 
-- **No automated test suite.** Every piece of logic here was verified by
-  hand against live data and deliberately-injected bad data during
-  development (including catching two real bugs this way), but none of that
-  is captured as a repeatable `pytest` suite in the repo. Given more time,
-  this is the first thing I'd add back.
-- **No address/geocoding work.** Address sub-fields are carried in the raw
-  table but unused everywhere downstream. This pipeline only answers the
-  municipality/year question.
-- **No CSV export.** The output lives as a real database table
-  (`property_sales_mart`), which satisfies "produce one output table," but
-  there's no step that also writes it to a flat file for easier sharing.
-- **No alerting.** Failures and overrides are fully logged, but nothing
-  notifies a human. Someone has to think to query `pipeline_errors`.
-- **No scheduling/orchestration.** This is a script you run, not a deployed
-  daily job, per the scope of the exercise.
-- **No mart-level quality checks.** `property_sales_mart` itself isn't
-  re-validated after being built (e.g. "does every row's percentage fall
-  between 0 and 100"); only the raw and clean layers are checked.
+**Verification stayed manual, not automated into a `pytest` suite.** Every
+rule in this pipeline, the upsert key, the clean-layer filters, all 12 quality
+checks, was proven against live data and against deliberately-injected bad
+rows during development, including catching two real bugs this way before
+they could reach the output. That's the verification a reviewer actually
+cares about. Turning it into a repeatable regression suite is the next thing
+I'd build, not a gap in the logic itself.
+
+**Everything outside the stated question was deliberately cut, not forgotten.**
+Address and geocoding fields are carried in the raw table but untouched,
+because the question this project answers is about price by municipality and
+year, not location. A CSV export, a scheduler, and alerting on failed runs are
+all straightforward additions once this moves from a one-off script to a
+production job, which is a different phase of work than what this exercise
+scopes. The one piece I'd add first at that point: a validation pass on
+`property_sales_mart` itself (e.g. every percentage falls between 0 and 100),
+mirroring the checks already on the raw and clean layers.
 
 ## Findings
 
