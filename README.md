@@ -28,16 +28,9 @@ MEDIAN_MARKET_PRICE, YOY_MEDIAN_PRICE_CHANGE_PCT`). Inspect it with:
 sqlite3 data/warehouse.sqlite3 "SELECT * FROM property_sales_mart LIMIT 10;"
 ```
 
-**Why SQLite, over DuckDB/Postgres/dbt:** it needed zero setup (no Docker, no
-server process, one file on disk), supports real `UNIQUE` indexes and
-`ON CONFLICT ... DO UPDATE` upserts, which the re-runnability requirement
-depends on directly, and ships with Python already. **Drawback:** it's
-missing conveniences a warehouse-oriented engine like DuckDB has built in.
-There's no `MEDIAN()` aggregate, so it's computed by hand via ranked window
-functions, no native CSV reader, and it's single-writer only, which would
-matter at real concurrency but doesn't here. I'd reach for Postgres or DuckDB
-instead if this needed to serve concurrent readers/writers or handle the
-100x-scale data volumes discussed below.
+Stack: SQLite. No setup, no server process, real `UNIQUE` indexes and
+`ON CONFLICT` upserts for re-runnability, and it ships with Python. At real
+concurrency or 100x scale, Postgres or DuckDB would be the better choice.
 
 ## Design decisions
 
@@ -103,31 +96,14 @@ cross-check the drop against the source's own metadata (e.g. its
 `last_modified` timestamp) automatically before allowing an override, rather
 than relying on a person to have done that check themselves.
 
-## Run and error tracking
-
-Every execution of `run.py` writes a row to **`pipeline_runs`**: started as
-`running`, updated at the end to `success` (with rows loaded and duration) or
-`failed` (with `failed_stage` naming exactly which of the four stages broke:
-`ingest`, `post_load_checks`, `transform_clean`, `transform_mart`). A process
-that crashes mid-run leaves no permanent "stuck" state. The next `connect()`
-call automatically marks any leftover `running` row as `failed`/`orphaned`.
-
-**`pipeline_errors`** holds one row per failure or quality-check violation,
-keyed to `run_id`, so a run that trips three checks at once gets three
-queryable rows, not one swallowed exception. An `ALLOW_ROW_COUNT_DROP`
-override gets logged here too, even on an otherwise-successful run.
-
 ## Data quality checks
 
-Twelve checks total, all of which genuinely abort the run on failure, not
-just log a warning:
-
-- **Pre-load** (run before any row is touched): required columns present;
-  row count vs. the previous run, within 5% (either direction).
-- **Post-load**: no duplicate keys under either the main or fallback upsert
-  key; `PARID`/`SALEDATE`/`SALECODE`/`INSTRTYP`/`MUNICODE` never blank; `PRICE`
-  never negative; `UPDATE_TIMESTAMP` never earlier than `INSERT_TIMESTAMP`;
-  and the dataset-specific check below.
+Twelve checks total (schema and row-count checks before loading; duplicate-key,
+not-null, non-negative-price, and timestamp checks after), all of which
+genuinely abort the run on failure, not just log a warning. Every failure, and
+every run itself, is logged to two tables (`pipeline_runs`, `pipeline_errors`),
+so a run that trips three checks at once leaves three queryable rows, not one
+swallowed exception.
 
 **The check written because of something found in this dataset:**
 `RECORDDATE` before `SALEDATE` is a logical impossibility, since the deed
