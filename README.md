@@ -165,6 +165,8 @@ mirroring the checks already on the raw and clean layers.
 
 ## Findings
 
+From the pipeline build itself:
+
 - Only **19.8%** of all 506,991 recorded transactions are genuine market
   sales by the county's own sale codes. The rest are family transfers,
   sheriff sales, corporate transfers, multi-parcel bundles, and a long tail
@@ -176,6 +178,28 @@ mirroring the checks already on the raw and clean layers.
   separate matching rule to avoid duplicating on every run.
 - **730 rows** (0.14%) have a recording date before the sale date, a
   measurable, consistent baseline of clerical error in the source.
+
+From actually querying `property_sales_mart` to answer the stated question:
+
+- **The market-sale share roughly tripled starting in 2020.** It sat at
+  7-16% from 2012-2019, then jumped to the high-20s/low-30s from 2020 onward
+  and has stayed there through 2026. That's a structural shift, not noise,
+  and anyone comparing pre-2020 and post-2020 numbers needs to account for it.
+- **Median market price has roughly doubled since 2012** (~$130K to ~$289K,
+  average across municipalities), with the steepest run-up in 2019-2022
+  (the pandemic-era market), and has been flattening since (+5% in 2024,
+  +4% in 2025).
+- **There's an ~11x price gap across municipalities in the same year.**
+  2025's highest medians were Edgeworth (~$999K) and Fox Chapel (~$977K);
+  the lowest were 2nd Ward-Clairton (~$90K) and McKees Rocks (~$100K), each
+  on 20+ market sales, so it's a real, persistent divide, not a thin-sample
+  artifact.
+- **`YOY_MEDIAN_PRICE_CHANGE_PCT` is noisy for small municipalities** and
+  should be read with that in mind. Several municipalities with fewer than
+  45 market sales in a year swung ±20-34% year over year on that count
+  alone. The mart doesn't filter these out, since suppressing small
+  municipalities would mean silently deciding what counts as a "real"
+  market for someone else.
 
 ## What surprised me
 
