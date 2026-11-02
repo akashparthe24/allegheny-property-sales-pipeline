@@ -149,19 +149,42 @@ the stated question.
 
 ## Data quality checks
 
-Ten checks total, all post-load (duplicate-key, not-null, non-negative-price,
-and timestamp checks), all of which genuinely abort the run on failure, not
-just log a warning. Every failure, and every run itself, is logged to two
-tables (`pipeline_runs`, `pipeline_errors`), so a run that trips three checks
-at once leaves three queryable rows, not one swallowed exception.
+Ten checks run in total, and all of them run after the data is loaded,
+against the real table, not against a sample or a guess. Any single failure
+stops the run completely, it doesn't just print a warning and continue, and
+every failure gets written to `pipeline_errors` along with the run itself in
+`pipeline_runs`, so if three checks fail at once, you get three separate
+queryable rows explaining exactly what broke, not one generic exception.
 
-**The check written because of something found in this dataset:**
-`RECORDDATE` before `SALEDATE` is a logical impossibility, since the deed
-can't be recorded before the sale happened. It shows up on 730 rows (0.14%)
-in the live data, almost certainly clerical typos (e.g. a year entered as
-`0212` instead of `2012`). The check allows up to 1% before failing,
-calibrated to that measured baseline. A rate much higher than that would
-mean a real date-parsing bug, not routine human error.
+What each one actually checks:
+- **Two duplicate-key checks**, one for the main key `(PARID, DEEDBOOK,
+  DEEDPAGE)`, one for the fallback key. These should always pass by
+  construction (the unique indexes make a real duplicate impossible), so
+  they exist as a second, independent confirmation that the upsert logic is
+  actually working the way it's supposed to.
+- **Five not-null checks**, on `PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`,
+  and `MUNICODE`. None of these have ever actually been blank in the live
+  data, but if one started showing up blank, it would mean something broke
+  upstream, and these columns are load-bearing: `PARID` and `MUNICODE` are
+  what the whole output table is grouped by.
+- **Price not negative.** A negative sale price is nonsensical and would
+  quietly distort any price calculation it got included in. Like the
+  not-null checks, this has never actually fired against real data either;
+  it's defensive, not a finding.
+- **Timestamp consistency.** `UPDATE_TIMESTAMP` should never be earlier
+  than `INSERT_TIMESTAMP`. If this ever fails, it means the upsert logic
+  itself has a bug, not the source data.
+
+**The one check actually written because of something found in this
+dataset:** `RECORDDATE` before `SALEDATE`. A deed can't be recorded before
+the sale it's recording ever happened, so this is a logical impossibility,
+not just an unusual value. It shows up on 730 rows (0.14%) in the live data,
+almost certainly clerical typos (e.g. a year typed as `0212` instead of
+`2012`). The check allows up to 1% before it fails, a threshold set directly
+from that measured 0.14% baseline, so a rate much higher than that would
+mean something like a real date-parsing bug, not ordinary human error at
+data entry. Unlike every other check above, this one is backed by an actual
+measured problem in the data, not just a defensive guardrail.
 
 ## Re-running / handling updates
 
