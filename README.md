@@ -369,6 +369,4 @@ exercise, for three things specifically:
 
 Every decision, the upsert key design, the flag-vs-drop rule, the check
 thresholds, which checks to keep or cut, was mine; I made the call after
-discussing the tradeoffs, not by accepting a default. I reviewed every
-design decision, the sale-code classification, and the quality-check logic
-in this document, and can explain and defend each one without notes.
+discussing the tradeoffs, not by accepting a default.
