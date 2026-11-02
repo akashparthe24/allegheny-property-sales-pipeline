@@ -277,14 +277,27 @@ From actually querying `property_sales_mart` to answer the stated question:
 ## What surprised me
 
 The biggest surprise wasn't a property of the data itself. It's that this
-source has no stable size at all. During this build, a live pull came back
-with 21% fewer rows than one pulled three days earlier, and I confirmed
-independently (via the API's own `total` field and the resource's
-`last_modified` timestamp) that it was a real change at the source, not a
-broken download on my end. Any pipeline built against this feed has to assume
-its *shape*, not just its contents, can change between runs, which is exactly
-why a simple row-count threshold (see decision #3) turned out to be the wrong
-tool here.
+source has no stable size at all. While building this, a live pull came
+back around 21% smaller than one I'd pulled just days earlier, and my first
+reaction was that I'd broken something, maybe a partial download or a
+pagination bug. So I checked it two ways before trusting it: re-ran the
+pull and got the same smaller count back, then went around my own pipeline
+entirely and hit WPRDC's `datastore_search` API directly to read its
+`total` field myself. It matched. The county had genuinely reloaded the
+dataset smaller; nothing on my end was broken.
+
+That left a real choice to make: loosen the row-count check's threshold so
+it would stop complaining, or keep the check strict and add an explicit way
+past it when a human confirms the drop is real. I picked the second option
+at first, because a permanently looser threshold would have blinded the
+pipeline to the next *actual* partial download, which is the failure this
+check exists to catch in the first place. Later, after living with that
+override for a while, I changed my mind again (see decision #3) and removed
+the check entirely, since a check a legitimate change keeps tripping stops
+being a meaningful signal, it just becomes a box to click past. Either way,
+the real lesson was the same: this feed's *shape*, not just its contents,
+can change between runs, and a pipeline built against it has to expect
+that, not treat it as an edge case.
 
 The second surprise was more mundane but cost real debugging time. SQLite's
 `CAST('' AS REAL)` silently returns `0.0`, not `NULL`. Combined with the fact
