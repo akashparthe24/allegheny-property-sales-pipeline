@@ -32,6 +32,18 @@ Stack: Python and SQLite. No setup, no server process, real `UNIQUE` indexes
 and `ON CONFLICT` upserts for re-runnability. At real concurrency or 100x
 scale, Postgres or DuckDB would be the better choice.
 
+## Project structure
+
+```
+pipeline/
+  config.py      - settings: API, upsert keys, thresholds
+  db.py          - connection + pipeline_runs/pipeline_errors audit tables
+  ingest.py      - CKAN API -> property_sales_load (upsert logic)
+  checks.py      - the ten post-load data quality checks
+  transform.py   - property_sales_load -> clean -> mart
+run.py           - orchestrates all four stages
+```
+
 ## Design decisions
 
 **1. Upsert on `(PARID, DEEDBOOK, DEEDPAGE)`, not a full reload every run.**
