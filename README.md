@@ -44,6 +44,17 @@ pipeline/
 run.py           - orchestrates all four stages
 ```
 
+Tables inside `data/warehouse.sqlite3`:
+
+```
+property_sales_load    - raw, upserted from the API, unchanged
+property_sales_clean    - filtered + flagged (see Transformations)
+property_sales_mart     - the final output table (one row per municipality/year)
+sale_codes_seed         - 47 hand-reviewed SALECODE -> market/non-market lookup
+pipeline_runs           - one row per pipeline execution
+pipeline_errors         - one row per check/stage failure, linked to pipeline_runs
+```
+
 ## Design decisions
 
 **1. Upsert on `(PARID, DEEDBOOK, DEEDPAGE)`, not a full reload every run.**
