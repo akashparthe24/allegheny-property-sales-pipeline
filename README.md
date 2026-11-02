@@ -28,100 +28,92 @@ MEDIAN_MARKET_PRICE, YOY_MEDIAN_PRICE_CHANGE_PCT`). Inspect it with:
 sqlite3 data/warehouse.sqlite3 "SELECT * FROM property_sales_mart LIMIT 10;"
 ```
 
-Stack: SQLite. No setup, no server process, real `UNIQUE` indexes and
-`ON CONFLICT` upserts for re-runnability, and it ships with Python. At real
-concurrency or 100x scale, Postgres or DuckDB would be the better choice.
+Stack: Python and SQLite. No setup, no server process, real `UNIQUE` indexes
+and `ON CONFLICT` upserts for re-runnability. At real concurrency or 100x
+scale, Postgres or DuckDB would be the better choice.
 
 ## Design decisions
 
 **1. Upsert on `(PARID, DEEDBOOK, DEEDPAGE)`, not a full reload every run.**
-The point: the pipeline needs to tell "this is a new transaction" apart from
-"this is the same transaction, maybe corrected," which a `DROP`+reload every
-run can't do at all, it just throws every row away and reloads, with no
-concept of anything having changed since last time. That's a real problem
-once a pipeline runs daily rather than once.
+If a record is new, it gets inserted as a new transaction. If a record
+already exists, we check it against three columns, `PARID`, `DEEDBOOK`, and
+`DEEDPAGE`, and if those match an existing row, we update that row instead
+of inserting a duplicate. To track this, we added two columns,
+`INSERT_TIMESTAMP` and `UPDATE_TIMESTAMP`: a brand-new row gets both set to
+the same value, an existing row that gets updated only has `UPDATE_TIMESTAMP`
+refreshed, so we always know when a row first showed up versus when it last
+changed, without a separate change log.
 
-So the real question was what, in the raw data itself, actually identifies
-one specific transaction. I ruled out the obvious candidates by checking them
-against the live data, not by guessing:
-- `_id` (CKAN's internal row number): useless. It regenerates on a full
-  source reload, so the same real transaction gets a different `_id` next
-  time, two runs of identical data would look 100% "different."
-- `PARID` alone: fails immediately. Grouping by `PARID` shows many parcels
-  have 2+ rows (one has 24 across 14 years). A parcel can legitimately sell
-  many times, so this would collapse real transaction history down to one
-  row per property, it's a foreign key to the property, not a key for a sale.
-- `SALEDATE`, `PRICE`, `SALECODE` individually: not unique, each repeats
-  constantly across unrelated sales. `PRICE`/`SALECODE` specifically can't be
-  *part of* a composite key either, since those are exactly the fields the
-  county corrects after the fact; if they were in the key, a correction would
-  look like "a new row appeared" instead of "an existing row changed."
+For about 600 records where `DEEDBOOK`/`DEEDPAGE` come back blank, that
+three-column check can't work, a blank value doesn't reliably match another
+blank value in SQL. So those rows go through a second key instead, built on
+`PARID` plus a wider set of columns (`RECORDDATE`, `SALEDATE`, `INSTRTYP`,
+`PRICE`, `SALECODE`), and get matched/updated against that condition instead.
 
-What's actually left in the data: `DEEDBOOK`+`DEEDPAGE`, the county's own
-recording reference, literally which document page this specific deed was
-filed on. `(PARID, DEEDBOOK, DEEDPAGE)` is the closest thing the raw data has
-to a natural, source-defined transaction identity, not something invented for
-this project. The one gap: ~600 rows (0.1%) have both fields blank, so those
-fall back to a wider 6-column match on the remaining descriptive fields
-(`PARID, RECORDDATE, SALEDATE, INSTRTYP, PRICE, SALECODE`) instead.
-**Drawback:** two keys means two upsert statements and two partial indexes
-instead of one simple `DROP`+reload, and this complexity is exactly what cost
-real debugging time, not hypothetically. Three separate bugs surfaced while
-building and later refining this (see "What surprised me" for all three): a
-NULL-vs-blank duplication bug, a partial-index collision between the two
-keys, and a NULL-normalization regression introduced while trimming the
-fallback key down to 6 columns. A full reload would have been correct on day
-one with zero bugs possible; this needed real testing, three times over, to
-actually trust.
+The alternative I rejected was dropping and reloading the whole raw table
+every run. It's simpler to write, but it throws away "did anything actually
+change since last time" completely, every row looks brand new on every run,
+which matters once this runs daily instead of once.
+**Drawback:** running two different key checks instead of one plain reload
+is genuinely more to maintain, and it wasn't free of risk either, I actually
+broke it twice while building and later adjusting the second key: once from
+a straight NULL-handling mistake, and once from trying to simplify that
+second key from 8 columns down to 6, which quietly let all ~600 of those
+rows start duplicating on rerun. A full reload would never have had either
+problem. That's the real trade here, more correctness for more fragility,
+and the fragility only showed up when I actually ran it against live data
+twice, not while I was writing the SQL.
 
-**2. The clean layer flags anomalies; it doesn't drop them.**
-The rejected alternative was silently excluding rows with a $0/$1 price or a
-record-date-before-sale-date from the clean table. That's tempting because it
-makes the "bad data" problem disappear, but it also means the published row
-counts would quietly shrink with no record of why, and anyone reading the
-output would have no way to know a filter had already been applied on their
-behalf. Instead, `property_sales_clean` keeps every usable row and adds
-boolean flag columns (`IS_ZERO_OR_ONE_DOLLAR`, `RECORDED_BEFORE_SALE`,
-`IS_ZIP_INVALID`, `IS_STATE_NOT_PA`), so a $1 family gift is still counted as
-a real transaction, just correctly excluded from the *market-price*
-calculation specifically. Only rows that are genuinely unusable, meaning a
-blank `PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`, or `MUNICODE`, an
-unparseable sale date, or a negative price, are dropped, and that's a
-deliberate, documented rule, not a silent side effect of a quality check.
-**Drawback:** the clean table is not actually "clean" in the sense of being
-safe to aggregate blindly. Anyone querying it has to know to filter on the
-flag columns for a market-price calculation, or they'll silently include $1
-gift sales in their numbers. A pre-filtered table would be harder to misuse,
-at the cost of hiding information.
+**2. The clean layer flags anomalies instead of dropping them.**
+For `property_sales_clean`, we added four flag columns:
+`IS_ZERO_OR_ONE_DOLLAR` (price is $0 or $1, usually a gift between family),
+`RECORDED_BEFORE_SALE` (the deed was recorded before the sale happened,
+which shouldn't be possible), `IS_ZIP_INVALID` (zip isn't 5 digits), and
+`IS_STATE_NOT_PA` (state isn't PA). A row with any of these issues stays in
+the table, just marked, so a $1 family transfer is still counted as a real
+transaction, it's excluded only from the *market-price* calculation
+specifically, not from the dataset. We only actually drop a row if it's
+genuinely unusable: a blank `PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`, or
+`MUNICODE`, a sale date that doesn't parse, or a negative price.
+
+The alternative I rejected was silently excluding the $0/$1 and bad-date
+rows from the clean table entirely. That makes the "bad data" problem
+disappear, but it also means the published row count quietly shrinks with
+no record of why, and anyone using the table has no way to know a filter
+already ran behind their back.
+**Drawback:** this means `property_sales_clean` isn't actually "clean" in
+the sense that you can aggregate it blindly. Anyone using it has to know to
+check the flag columns before computing a market price, or they'll silently
+include $1 gift sales in their numbers. A table that was pre-filtered would
+be harder to misuse by accident, at the cost of hiding that information from
+whoever's using it.
 
 **3. Validation happens entirely after loading, not split pre/post.**
-The point of validating anything before the real load is to avoid wasting
-time and I/O loading data that's just going to get rejected anyway, and to
-stop obviously-bad data before it ever touches a real table. That's a
-reasonable goal, so I actually built two checks around it: a schema check
-(did the API still have every required column) and a row-count guard (did
-the total move more than a normal day's activity would explain), both run
-against just the first API page.
+What I actually did: every check, duplicate keys, not-null, price, dates,
+timestamps, ten in total, runs after the data is already loaded into
+`property_sales_load`, against the real table. I chose this because the
+outcome I wanted was a check that catches an actual problem in the actual
+data, not a guess made off the first page of an API response.
 
-I rejected keeping either, after actually working with them, not in theory.
-The row-count guard needed a standing override (`ALLOW_ROW_COUNT_DROP=1`)
-just to survive this source's routine volatility (one pull during this build
-came back 21% smaller than one from three days earlier, confirmed real, not
-a broken download), and a check a human has to override regularly isn't
-protecting anything, it's a logged shrug. The schema check turned out to be
-redundant for a different reason: the load table is built from whatever
-columns the API actually returns, so a genuinely missing column isn't
-silently ignored, it surfaces as a hard SQL error the moment any check or
-transform references that column by name, the pre-load version of that check
-wasn't catching anything a post-load failure wouldn't catch anyway. So all
-validation now runs post-load, against the real data, where the ten checks
-(duplicate keys, not-null, price, dates, timestamps) catch correctness
-problems directly instead of guessing at them from page one.
-**Drawback:** a bad pull now always finishes writing to `property_sales_load`
-before anything catches it, so a truly broken run costs more wasted I/O than
-it would have with a pre-load gate. And a missing column fails as a generic
-SQL error rather than a clear, named "these columns disappeared" message,
-which costs a reader a few extra seconds working out what actually broke.
+What I rejected: I'd originally built two checks to run before the real
+load, a schema check (does the API still have every column we depend on)
+and a row-count check (did the total move more than a normal day's activity
+would explain). I pulled both out after actually living with them. The
+row-count check needed a manual override (`ALLOW_ROW_COUNT_DROP=1`) just to
+get through this source's normal volatility, one pull during this build
+came back 21% smaller than one from three days earlier, and that was
+legitimate, not a bug. A check that needs to be overridden regularly isn't
+really protecting anything anymore. The schema check turned out to be
+pointless for a different reason: if a column actually went missing from
+the API, the pipeline would already fail loudly the moment anything tried
+to reference that column by name, so the separate check wasn't catching
+anything new.
+**Drawback:** without a pre-load check, a genuinely bad pull still gets
+fully written into `property_sales_load` before anything catches it, so a
+broken run costs more wasted time and I/O than it would with a gate in
+front. And if a column does go missing, the failure shows up as a generic
+SQL error instead of a clear message naming exactly which column
+disappeared.
 
 ## Transformations
 
