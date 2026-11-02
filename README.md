@@ -327,18 +327,25 @@ real data twice, not reasoned through once.
 
 ## AI disclosure
 
-I built this with Claude Code (Anthropic's CLI agent) as my primary tool
-through the whole exercise. I directed the architecture through discussion,
-including the choice of SQLite, the upsert key design (and specifically
-rejecting `PARID` alone and rejecting including `PRICE`/`SALECODE` in the
-key), the flag-vs-drop rule for anomalies, and the check thresholds, and
-Claude implemented and tested each piece against the live dataset. We found
-and fixed three real bugs together by testing against real data rather than
-trusting the SQL in the abstract: a NULL-handling bug that silently excluded
-2,711 valid rows from the clean table, a partial-index collision bug where
-normalizing blank deed info for one upsert key unexpectedly collided with
-the other key's index, and a NULL-normalization regression introduced while
-simplifying the fallback key, caught by re-running the pipeline twice and
-watching the row count grow by exactly 600. I reviewed the design decisions,
-the sale-code classification, and the quality-check logic above, and can
-explain and defend each one without notes.
+I used Claude Code (Anthropic's CLI agent) as my main tool throughout this
+exercise, for three things specifically:
+
+- **Writing the code.** Claude implemented the ingest, upsert logic,
+  quality checks, and transforms in `pipeline/`, and wrote the SQL for the
+  clean and mart tables.
+- **Analyzing the data.** Claude ran queries against the live dataset to
+  profile columns, check cardinality on key candidates, measure how often
+  anomalies like the bad-date rows actually occur, and verify behavior
+  (e.g. confirming a re-run touched zero rows) rather than assuming it.
+- **Following best practices.** Claude flagged and helped fix three real
+  bugs found by testing against live data rather than reasoning about the
+  SQL alone: a NULL-handling bug that silently dropped 2,711 valid rows, a
+  partial-index collision between the two upsert keys, and a
+  NULL-normalization regression introduced while simplifying the fallback
+  key.
+
+Every decision, the upsert key design, the flag-vs-drop rule, the check
+thresholds, which checks to keep or cut, was mine; I made the call after
+discussing the tradeoffs, not by accepting a default. I reviewed every
+design decision, the sale-code classification, and the quality-check logic
+in this document, and can explain and defend each one without notes.
