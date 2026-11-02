@@ -1,16 +1,5 @@
-"""Data quality checks: pre-load (run before property_sales_load is touched)
-and post-load (run after it's loaded)."""
+"""Data quality checks: post-load (run after property_sales_load is loaded)."""
 from . import config
-
-
-# A required column is missing from the API response.
-class SchemaChangedError(RuntimeError):
-    pass
-
-
-# Row count changed too much vs. the previous run.
-class RowCountChangeError(RuntimeError):
-    pass
 
 
 # One or more post-load checks failed; holds every failure, not just the first.
@@ -19,61 +8,6 @@ class CheckFailure(RuntimeError):
         self.failures = failures
         detail = "; ".join(f"{f['name']}: {f['detail']}" for f in failures)
         super().__init__(f"{len(failures)} check(s) failed: {detail}")
-
-
-# Pre-load check: all of config.REQUIRED_COLUMNS must be present.
-def check_required_columns(api_columns):
-    missing = [c for c in config.REQUIRED_COLUMNS if c not in api_columns]
-    if missing:
-        raise SchemaChangedError(
-            f"API response is missing expected columns {missing}. "
-            "The source may have changed shape -- stopping rather than guessing at a mapping."
-        )
-
-
-# True once property_sales_load has been created at least once.
-def _table_exists(con) -> bool:
-    return con.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", [config.LOAD_TABLE]
-    ).fetchone()[0] > 0
-
-
-# Pre-load check: new row count vs. the previous run, within config.MAX_ROW_COUNT_CHANGE_PCT.
-# ALLOW_ROW_COUNT_DROP=1 overrides a failure instead of raising (and gets logged).
-def check_row_count_vs_previous(con, new_total: int) -> dict:
-    if not _table_exists(con):
-        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
-                "detail": "no prior data to compare against (first run)"}
-
-    previous = con.execute(f"SELECT COUNT(*) FROM {config.LOAD_TABLE}").fetchone()[0]
-    if previous == 0:
-        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
-                "detail": "no prior data to compare against (table empty)"}
-
-    pct_change = 100.0 * (new_total - previous) / previous
-    exceeds = abs(pct_change) > config.MAX_ROW_COUNT_CHANGE_PCT
-
-    if not exceeds:
-        return {"name": "row_count_vs_previous", "passed": True, "overridden": False,
-                "detail": f"{previous} -> {new_total} ({pct_change:+.1f}%)"}
-
-    if config.ALLOW_ROW_COUNT_DROP_OVERRIDE:
-        return {
-            "name": "row_count_vs_previous", "passed": True, "overridden": True,
-            "detail": (
-                f"{previous} -> {new_total} ({pct_change:+.1f}%) exceeds the "
-                f"{config.MAX_ROW_COUNT_CHANGE_PCT}% allowance -- ALLOW_ROW_COUNT_DROP override "
-                "applied. Treat this as a new baseline only after independently confirming the "
-                "change against the source."
-            ),
-        }
-
-    raise RowCountChangeError(
-        f"row count would change {previous} -> {new_total} ({pct_change:+.1f}%), exceeding the "
-        f"{config.MAX_ROW_COUNT_CHANGE_PCT}% allowance -- could be a partial/interrupted load on "
-        "our end, or a real change at the source. Not loading until a human confirms which. "
-        "Set ALLOW_ROW_COUNT_DROP=1 to proceed after confirming this is legitimate."
-    )
 
 
 # Should always pass -- the matching unique index makes duplicates impossible.

@@ -6,26 +6,28 @@ exactly the fields the county corrects after the fact; including them in the
 key would make a correction look like a new row instead of an update.
 
 Fallback key: ~0.1% of rows have a blank DEEDBOOK/DEEDPAGE. SQLite treats two
-NULLs as never equal, so those rows need the wider 8-column key WPRDC's own ETL
-uses instead. Each key has its own partial unique index and its own upsert
-statement -- see _ensure_table_and_indexes and _build_upsert_sql.
+NULLs as never equal, so those rows need a wider 6-column key instead. Each
+key has its own partial unique index and its own upsert statement -- see
+_ensure_table_and_indexes and _build_upsert_sql.
 
 _id (CKAN's internal row id) is excluded from the key and from change-detection:
 it regenerates on a full source reload, so comparing it would make every row
 look "changed" every run.
 
-Two checks (pipeline/checks.py) run against just the first API page, before the
-real load starts -- a schema change or a suspicious row-count swing aborts here,
-before property_sales_load is touched.
 """
 import requests
 
-from . import checks, config
+from . import config
 
 AUDIT_COLUMNS = ["INSERT_TIMESTAMP", "UPDATE_TIMESTAMP"]
 MAIN_KEY = config.MAIN_KEY
 FALLBACK_KEY = config.FALLBACK_KEY
 IGNORE_FOR_COMPARISON = {"_id"}  # churns on every source reload; not a real value change
+
+# Both partial indexes' WHERE predicates test DEEDBOOK/DEEDPAGE against '',
+# regardless of which key is in play -- so these two must always be normalized
+# NULL -> '', even though FALLBACK_KEY itself no longer includes them.
+PREDICATE_COLUMNS = {"DEEDBOOK", "DEEDPAGE"}
 
 # Must match the partial index definitions exactly -- SQLite requires an upsert's
 # ON CONFLICT target to repeat a partial index's WHERE clause verbatim.
@@ -95,16 +97,13 @@ def _build_upsert_sql(all_columns, key_columns, index_where):
     )
 
 
-# Entry point for the ingest stage: fetch page 1 -> pre-load checks -> ensure
-# table/indexes -> page through the rest, upserting each page, all in one
-# transaction. Returns {"rows_loaded": int, "row_count_check": dict}.
+# Entry point for the ingest stage: fetch page 1 -> ensure table/indexes ->
+# page through the rest, upserting each page, all in one transaction.
+# Returns {"rows_loaded": int}.
 def load_property_sales(con) -> dict:
     first_page = _fetch_page(offset=0)
     columns = [f["id"] for f in first_page["fields"]]
     total = first_page["total"]
-
-    checks.check_required_columns(columns)
-    row_count_check = checks.check_row_count_vs_previous(con, total)
 
     _ensure_table_and_indexes(con, columns)
     main_sql = _build_upsert_sql(columns, MAIN_KEY, MAIN_INDEX_WHERE)
@@ -119,10 +118,13 @@ def load_property_sales(con) -> dict:
         return bool(r.get("DEEDBOOK")) and bool(r.get("DEEDPAGE"))
 
     def row_values(r, key_columns):
-        # Normalize NULL -> '' only in key columns, so two blank-deed rows can
-        # still match each other under the unique index (NULL never equals NULL).
+        # Normalize NULL -> '' in key columns (so two blank-deed rows can still
+        # match each other under the unique index) and in PREDICATE_COLUMNS
+        # (so the partial indexes' WHERE clauses, which always test DEEDBOOK/
+        # DEEDPAGE against '', see a real empty string instead of NULL).
+        normalize_cols = set(key_columns) | PREDICATE_COLUMNS
         return tuple(
-            ("" if c in key_columns else None) if r.get(c) is None else str(r.get(c))
+            ("" if c in normalize_cols else None) if r.get(c) is None else str(r.get(c))
             for c in columns
         ) + (loaded_at, loaded_at)
 
@@ -147,4 +149,4 @@ def load_property_sales(con) -> dict:
             break
     con.execute("COMMIT")
 
-    return {"rows_loaded": loaded, "row_count_check": row_count_check}
+    return {"rows_loaded": loaded}

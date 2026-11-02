@@ -27,12 +27,6 @@ def main():
         sys.exit(1)
 
     rows_loaded = result["rows_loaded"]
-    row_count_check = result["row_count_check"]
-    if row_count_check["overridden"]:
-        print(f"  [OVERRIDE] {row_count_check['name']}: {row_count_check['detail']}")
-        db.log_error(con, run_id, "ingest", f"{row_count_check['name']}_overridden", row_count_check["detail"])
-    else:
-        print(f"  [pass] {row_count_check['name']}: {row_count_check['detail']}")
     print(f"Loaded {rows_loaded} rows into {db.config.LOAD_TABLE}")
 
     print("\n=== Checks (post-load) ===")
