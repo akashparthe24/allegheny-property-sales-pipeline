@@ -157,21 +157,21 @@ every failure gets written to `pipeline_errors` along with the run itself in
 queryable rows explaining exactly what broke, not one generic exception.
 
 What each one actually checks:
-- **Two duplicate-key checks**, one for the main key `(PARID, DEEDBOOK,
+- **Two duplicate-key checks** – one for the main key `(PARID, DEEDBOOK,
   DEEDPAGE)`, one for the fallback key. These should always pass by
   construction (the unique indexes make a real duplicate impossible), so
   they exist as a second, independent confirmation that the upsert logic is
   actually working the way it's supposed to.
-- **Five not-null checks**, on `PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`,
+- **Five not-null checks** – on `PARID`, `SALEDATE`, `SALECODE`, `INSTRTYP`,
   and `MUNICODE`. None of these have ever actually been blank in the live
   data, but if one started showing up blank, it would mean something broke
   upstream, and these columns are load-bearing: `PARID` and `MUNICODE` are
   what the whole output table is grouped by.
-- **Price not negative.** A negative sale price is nonsensical and would
+- **Price not negative** – a negative sale price is nonsensical and would
   quietly distort any price calculation it got included in. Like the
   not-null checks, this has never actually fired against real data either;
   it's defensive, not a finding.
-- **Timestamp consistency.** `UPDATE_TIMESTAMP` should never be earlier
+- **Timestamp consistency** – `UPDATE_TIMESTAMP` should never be earlier
   than `INSERT_TIMESTAMP`. If this ever fails, it means the upsert logic
   itself has a bug, not the source data.
 
