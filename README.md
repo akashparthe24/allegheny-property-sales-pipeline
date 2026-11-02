@@ -58,7 +58,7 @@ which matters once this runs daily instead of once.
 is genuinely more to maintain, and it wasn't free of risk either, I actually
 broke it twice while building and later adjusting the second key: once from
 a straight NULL-handling mistake, and once from trying to simplify that
-second key from 8 columns down to 6, which quietly let all ~600 of those
+second key from 8 columns down to 6, which quietly let all 600 of those
 rows start duplicating on rerun. A full reload would never have had either
 problem. That's the real trade here, more correctness for more fragility,
 and the fragility only showed up when I actually ran it against live data
@@ -202,7 +202,8 @@ or blank required columns than a clean, smaller-but-valid dataset is.
 ## Scaling to 100x / daily refreshes
 
 At tens of millions of rows, paginating the full `datastore_search` endpoint
-every run (currently ~100 HTTP requests, 1-3 minutes) stops being free. I'd
+every run (currently about 100 HTTP requests, 1-3 minutes) stops being
+free. I'd
 switch to pulling only rows past a watermark via `datastore_search_sql`
 (confirmed this endpoint supports a real `WHERE` clause against this
 resource), while keeping a periodic full-key-set reconciliation pass, because
@@ -257,15 +258,15 @@ From actually querying `property_sales_mart` to answer the stated question:
   7-16% from 2012-2019, then jumped to the high-20s/low-30s from 2020 onward
   and has stayed there through 2026. That's a structural shift, not noise,
   and anyone comparing pre-2020 and post-2020 numbers needs to account for it.
-- **Median market price has roughly doubled since 2012** (~$130K to ~$289K,
-  average across municipalities), with the steepest run-up in 2019-2022
-  (the pandemic-era market), and has been flattening since (+5% in 2024,
-  +4% in 2025).
-- **There's an ~11x price gap across municipalities in the same year.**
-  2025's highest medians were Edgeworth (~$999K) and Fox Chapel (~$977K);
-  the lowest were 2nd Ward-Clairton (~$90K) and McKees Rocks (~$100K), each
-  on 20+ market sales, so it's a real, persistent divide, not a thin-sample
-  artifact.
+- **Median market price has roughly doubled since 2012**, from about $130K
+  to about $289K on average across municipalities, with the steepest run-up
+  in 2019-2022 (the pandemic-era market), and has been flattening since
+  (+5% in 2024, +4% in 2025).
+- **There's roughly an 11x price gap across municipalities in the same
+  year.** 2025's highest medians were Edgeworth (about $999K) and Fox
+  Chapel (about $977K); the lowest were 2nd Ward-Clairton (about $90K) and
+  McKees Rocks (about $100K), each on 20+ market sales, so it's a real,
+  persistent divide, not a thin-sample artifact.
 - **`YOY_MEDIAN_PRICE_CHANGE_PCT` is noisy for small municipalities** and
   should be read with that in mind. Several municipalities with fewer than
   45 market sales in a year swung ±20-34% year over year on that count
@@ -304,7 +305,7 @@ blank values to `''` was keyed off key-column membership, not column
 identity, so once those two columns left the key, they stopped getting
 normalized and started landing as true SQL `NULL`. Both partial indexes test
 `DEEDBOOK = ''`/`!= ''`, and `NULL = ''` is neither true nor false in SQL,
-so those ~600 rows silently lost duplicate protection entirely. Running the
+so those 600 rows silently lost duplicate protection entirely. Running the
 pipeline twice to verify re-runnability caught it immediately: the row count
 grew by exactly 600 on the second run. Fixed by normalizing `DEEDBOOK`/
 `DEEDPAGE` unconditionally, independent of which key is active. The lesson
